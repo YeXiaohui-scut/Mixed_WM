@@ -14,7 +14,7 @@ class COCOWithMetaSeal(data.Dataset):
     COCO Dataset with MetaSeal watermark generation.
     Combines BLIP captioning + QR code generation for semantic watermarks.
     """
-    def __init__(self, root, annFile, transform=None, use_blip=True, device='cuda'):
+    def __init__(self, root, annFile=None, transform=None, use_blip=True, device='cuda'):
         """
         Args:
             root: Path to COCO images
@@ -23,7 +23,26 @@ class COCOWithMetaSeal(data.Dataset):
             use_blip: Whether to use BLIP for captioning (set False for testing)
             device: Device for BLIP model
         """
-        self.coco_dataset = CocoCaptions(root=root, annFile=annFile)
+        # If an annotations file is provided and exists, use CocoCaptions.
+        # Otherwise, fall back to treating `root` as an images-only folder.
+        self.use_coco = False
+        if annFile is not None:
+            try:
+                self.coco_dataset = CocoCaptions(root=root, annFile=annFile)
+                self.use_coco = True
+            except Exception:
+                print("Warning: Could not load COCO captions dataset, falling back to images-only mode")
+                self.use_coco = False
+
+        if not self.use_coco:
+            # build a list of image file paths under root
+            from pathlib import Path
+            p = Path(root)
+            exts = ('*.jpg', '*.jpeg', '*.png', '*.bmp')
+            self.image_paths = []
+            for e in exts:
+                self.image_paths.extend(sorted(p.rglob(e)))
+            print(f"Images-only mode: found {len(self.image_paths)} images under {root}")
         self.transform = transform if transform else self._default_transform()
         self.use_blip = use_blip
         self.device = device
@@ -32,10 +51,10 @@ class COCOWithMetaSeal(data.Dataset):
         if self.use_blip:
             print("Loading BLIP model for semantic extraction...")
             self.blip_processor = BlipProcessor.from_pretrained(
-                "Salesforce/blip-image-captioning-base"
+                "/home/xiaohui/.cache/huggingface/hub/stabilityai/blip/"
             )
             self.blip_model = BlipForConditionalGeneration.from_pretrained(
-                "Salesforce/blip-image-captioning-base"
+                "/home/xiaohui/.cache/huggingface/hub/stabilityai/blip/"
             ).to(device)
             self.blip_model.eval()
             print("BLIP model loaded successfully.")
@@ -62,15 +81,19 @@ class COCOWithMetaSeal(data.Dataset):
         if not self.use_blip:
             # Fallback for testing without BLIP
             return f"test_image_{torch.randint(0, 100000, (1,)).item()}"
-        
+
         with torch.no_grad():
             # Prepare image for BLIP
-            inputs = self.blip_processor(image, return_tensors="pt").to(self.device)
-            
+            inputs = self.blip_processor(image, return_tensors="pt")
+            # move tensors to device
+            for k, v in inputs.items():
+                if isinstance(v, torch.Tensor):
+                    inputs[k] = v.to(self.device)
+
             # Generate caption
             out = self.blip_model.generate(**inputs, max_length=50)
             caption = self.blip_processor.decode(out[0], skip_special_tokens=True)
-            
+
         return caption
     
     def _sign_caption(self, caption, private_key="latent_wofa_seal_2025"):
@@ -131,7 +154,7 @@ class COCOWithMetaSeal(data.Dataset):
         return qr_tensor
     
     def __len__(self):
-        return len(self.coco_dataset)
+        return len(self.coco_dataset) if self.use_coco else len(self.image_paths)
     
     def __getitem__(self, idx):
         """
@@ -140,9 +163,14 @@ class COCOWithMetaSeal(data.Dataset):
             watermark: QR code pattern tensor [1, 256, 256]
             caption: Original caption string
         """
-        # Load image and annotations from COCO
-        image, captions = self.coco_dataset[idx]
-        
+        # Load image (from COCO annotations if available, otherwise from image paths)
+        if self.use_coco:
+            image, captions = self.coco_dataset[idx]
+        else:
+            # open image path
+            img_path = self.image_paths[idx]
+            image = Image.open(img_path).convert('RGB')
+
         # Generate semantic caption using BLIP
         caption = self._generate_caption(image)
         
@@ -164,7 +192,7 @@ class COCOWithMetaSeal(data.Dataset):
         }
 
 
-def get_dataloader(root, annFile, batch_size=8, num_workers=4, use_blip=True, device='cuda'):
+def get_dataloader(root, batch_size=8, num_workers=4, use_blip=True, device='cuda'):
     """
     Create DataLoader for training.
     
@@ -181,7 +209,7 @@ def get_dataloader(root, annFile, batch_size=8, num_workers=4, use_blip=True, de
     """
     dataset = COCOWithMetaSeal(
         root=root,
-        annFile=annFile,
+        #annFile=annFile,
         use_blip=use_blip,
         device=device
     )
@@ -204,9 +232,9 @@ if __name__ == "__main__":
     
     # Create a dummy dataset for testing
     dataset = COCOWithMetaSeal(
-        root="./data/coco/train2017",
-        annFile="./data/coco/annotations/captions_train2017.json",
-        use_blip=False  # Set to True to test with BLIP
+        root="/home/xiaohui/2025_Diffusion_wm/Mixed_WM/2025_YXH/dataset/train",
+        #annFile="./data/coco/annotations/captions_train2017.json",
+        use_blip=True  # Set to True to test with BLIP
     )
     
     # Test single sample
